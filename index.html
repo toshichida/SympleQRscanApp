@@ -36,6 +36,9 @@
       .data-label { width: 80px; font-size: 0.9em; }
       button { width: 100%; margin: 8px 0; }
     }
+    @media (min-width: 600px) {
+      #reader { min-height: 500px; }
+    }
   </style>
 </head>
 <body>
@@ -180,10 +183,11 @@
         html5QrcodeScanner = new Html5Qrcode("reader");
       }
 
-      const config = {
+      var isPc = window.innerWidth >= 600;
+      var config = {
         fps: 5,
-        qrbox: { width: 250, height: 250 },
-        aspectRatio: (window.innerWidth > 600) ? 1.777778 : 1.0
+        qrbox: isPc ? { width: 500, height: 500 } : { width: 250, height: 250 },
+        aspectRatio: isPc ? 1.777778 : 1.0
       };
 
       html5QrcodeScanner.start(
