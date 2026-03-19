@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>QR受付システム</title>
+  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 10px; background: #f0f2f5; color: #333; }
+    .container { max-width: 800px; margin: 0 auto; background: white; padding: 20px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
+    h2 { margin: 0 0 20px; color: #333; }
+    .config-section { margin-bottom: 20px; padding: 15px; background: #f8f9fa; border-radius: 8px; }
+    .config-section label { display: block; font-weight: bold; margin-bottom: 6px; }
+    .config-section input { width: 100%; padding: 10px; font-size: 14px; border: 1px solid #ccc; border-radius: 6px; }
+    .config-section button { margin-top: 8px; padding: 8px 16px; background: #007bff; color: white; border: none; border-radius: 6px; cursor: pointer; }
+    #reader { width: 100%; min-height: 300px; background: #000; border-radius: 8px; overflow: hidden; }
+    #result-area { display: none; margin-top: 20px; padding: 20px; border-radius: 8px; text-align: left; }
+    .success { background: #d4edda; border: 1px solid #c3e6cb; color: #155724; }
+    .warning { background: #fff3cd; border: 1px solid #ffeeba; color: #856404; }
+    .error { background: #f8d7da; border: 1px solid #f5c6cb; color: #721c24; }
+    .data-row { margin: 8px 0; font-size: 1.1em; padding: 8px 0; border-bottom: 1px solid rgba(0,0,0,0.05); }
+    .data-label { font-weight: bold; display: inline-block; width: 110px; color: #555; }
+    button { padding: 14px 28px; font-size: 1.1em; cursor: pointer; background: #007bff; color: white; border: none; border-radius: 8px; margin: 8px 4px 8px 0; }
+    button:disabled { background: #ccc; cursor: not-allowed; }
+    #start-btn { background: #28a745; font-weight: bold; }
+    #stop-btn { background: #dc3545; }
+    #restart-btn { background: #6c757d; }
+    #error-msg { display: none; color: #dc3545; padding: 15px; border: 1px solid #dc3545; background: #fff5f5; border-radius: 8px; margin: 10px 0; }
+    .log-section { margin-top: 20px; padding: 15px; background: #f8f9fa; border-radius: 8px; }
+    .log-section h3 { margin: 0 0 10px; font-size: 1em; }
+    .log-list { max-height: 150px; overflow-y: auto; font-size: 0.9em; }
+    .log-item { padding: 4px 0; border-bottom: 1px solid #eee; }
+    @media (max-width: 600px) {
+      .container { padding: 15px; }
+      .data-label { width: 80px; font-size: 0.9em; }
+      button { width: 100%; margin: 8px 0; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h2>QR受付システム</h2>
+
+    <div class="config-section">
+      <label for="gas-url">GAS API URL（デプロイ後のウェブアプリURL）</label>
+      <input type="url" id="gas-url" placeholder="https://script.google.com/macros/s/.../exec">
+      <button type="button" onclick="saveGasUrl()">保存</button>
+    </div>
+
+    <div id="error-msg"></div>
+
+    <div id="controls">
+      <p>GAS API URL を入力・保存してから、下のボタンでカメラを起動してください</p>
+      <button id="start-btn" onclick="requestCamera()">📸 カメラを起動してスキャン</button>
+    </div>
+
+    <div id="reader" style="display:none;"></div>
+    <p id="status-msg"></p>
+    <div id="scan-controls" style="display:none;">
+      <button id="stop-btn" onclick="stopScanner()">⏹ スキャン停止</button>
+    </div>
+
+    <div id="result-area">
+      <h3 id="result-title"></h3>
+      <div id="result-details"></div>
+      <div style="text-align:center; margin-top:15px;">
+        <button id="restart-btn" onclick="resetScanner()">次の人をスキャン</button>
+      </div>
+    </div>
+
+    <div class="log-section">
+      <h3>本日の受付ログ <span id="log-count">0</span> 件</h3>
+      <div id="log-list" class="log-list"></div>
+    </div>
+  </div>
+
+  <script>
+    const STORAGE_GAS_URL = 'qr_scan_gas_url';
+    const STORAGE_LOG = 'qr_scan_log';
+    const SAME_QR_COOLDOWN_MS = 4000;
+    const GLOBAL_COOLDOWN_MS = 1500;
+    const BUSY_RETRY_MAX = 2;
+    const BUSY_RETRY_DELAY_MS = 1500;
+
+    let html5QrcodeScanner = null;
+    let displaySettings = [];
+    let isSending = false;
+    let lastSentQr = null;
+    let lastSentTime = 0;
+    let acceptedSet = new Set();
+    let todayLog = [];
+
+    window.onload = function() {
+      const saved = localStorage.getItem(STORAGE_GAS_URL);
+      if (saved) {
+        document.getElementById('gas-url').value = saved;
+      }
+      loadLogFromStorage();
+      updateLogDisplay();
+      loadSettings();
+    };
+
+    function saveGasUrl() {
+      const url = document.getElementById('gas-url').value.trim();
+      if (url) {
+        localStorage.setItem(STORAGE_GAS_URL, url);
+        alert('保存しました');
+        loadSettings();
+      } else {
+        alert('URLを入力してください');
+      }
+    }
+
+    function getGasUrl() {
+      return document.getElementById('gas-url').value.trim() || localStorage.getItem(STORAGE_GAS_URL) || '';
+    }
+
+    function loadSettings() {
+      const gasUrl = getGasUrl();
+      if (!gasUrl) return;
+      const url = gasUrl + (gasUrl.indexOf('?') >= 0 ? '&' : '?') + 'action=settings';
+      fetch(url, { method: 'GET', redirect: 'follow' })
+        .then(r => r.json())
+        .then(data => {
+          if (Array.isArray(data)) {
+            displaySettings = data;
+          } else if (data.status === 'error') {
+            displaySettings = [];
+          }
+        })
+        .catch(() => { displaySettings = []; });
+    }
+
+    function loadLogFromStorage() {
+      try {
+        const raw = sessionStorage.getItem(STORAGE_LOG);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          todayLog = Array.isArray(parsed) ? parsed : [];
+          todayLog.forEach(item => acceptedSet.add(item.qrData));
+        }
+      } catch (e) { todayLog = []; }
+    }
+
+    function saveLogToStorage() {
+      sessionStorage.setItem(STORAGE_LOG, JSON.stringify(todayLog));
+    }
+
+    function addToLog(qrData, name, time, status) {
+      todayLog.unshift({ qrData, name: name || '', time: time || '', status, ts: Date.now() });
+      if (todayLog.length > 100) todayLog.pop();
+      saveLogToStorage();
+      updateLogDisplay();
+    }
+
+    function updateLogDisplay() {
+      const count = todayLog.filter(i => i.status === 'success').length;
+      document.getElementById('log-count').textContent = count;
+      const list = document.getElementById('log-list');
+      list.innerHTML = todayLog.slice(0, 20).map(i => {
+        const icon = i.status === 'success' ? '✅' : i.status === 'duplicate' ? '⚠️' : '❌';
+        return `<div class="log-item">${icon} ${i.name || i.qrData} ${i.time ? '(' + i.time + ')' : ''}</div>`;
+      }).join('');
+    }
+
+    function requestCamera() {
+      const gasUrl = getGasUrl();
+      if (!gasUrl) {
+        alert('GAS API URL を入力して保存してください');
+        return;
+      }
+      document.getElementById('controls').style.display = 'none';
+      document.getElementById('error-msg').style.display = 'none';
+      document.getElementById('reader').style.display = 'block';
+      document.getElementById('scan-controls').style.display = 'block';
+      document.getElementById('status-msg').textContent = 'カメラを起動中...';
+
+      if (!html5QrcodeScanner) {
+        html5QrcodeScanner = new Html5Qrcode("reader");
+      }
+
+      const config = {
+        fps: 5,
+        qrbox: { width: 250, height: 250 },
+        aspectRatio: (window.innerWidth > 600) ? 1.777778 : 1.0
+      };
+
+      html5QrcodeScanner.start(
+        { facingMode: "environment" },
+        config,
+        onScanSuccess,
+        onScanFailure
+      ).then(() => {
+        document.getElementById('status-msg').textContent = 'スキャン中...';
+      }).catch(err => {
+        showError('カメラの起動に失敗しました。<br>ブラウザの設定でカメラを「許可」してから、ページを再読み込みしてください。<br><br>エラー: ' + err);
+      });
+    }
+
+    function stopScanner() {
+      if (html5QrcodeScanner && html5QrcodeScanner.isScanning && html5QrcodeScanner.isScanning()) {
+        html5QrcodeScanner.stop();
+      }
+      document.getElementById('reader').style.display = 'none';
+      document.getElementById('scan-controls').style.display = 'none';
+      document.getElementById('controls').style.display = 'block';
+      document.getElementById('status-msg').textContent = '';
+    }
+
+    function onScanSuccess(decodedText) {
+      if (isSending) return;
+
+      const now = Date.now();
+      if (acceptedSet.has(decodedText)) {
+        showResultLocal('duplicate', '既に受付済みです（フロントキャッシュ）', decodedText);
+        document.getElementById('reader').style.display = 'none';
+        document.getElementById('result-area').style.display = 'block';
+        document.getElementById('status-msg').textContent = '';
+        return;
+      }
+      if (lastSentQr === decodedText && (now - lastSentTime) < SAME_QR_COOLDOWN_MS) return;
+      if ((now - lastSentTime) < GLOBAL_COOLDOWN_MS) return;
+
+      isSending = true;
+      if (html5QrcodeScanner) html5QrcodeScanner.pause();
+      if (navigator.vibrate) navigator.vibrate(200);
+      playSound('scan');
+      document.getElementById('status-msg').textContent = 'データを照会中...';
+
+      sendCheckIn(decodedText, 0);
+    }
+
+    function onScanFailure() {}
+
+    function sendCheckIn(qrData, retryCount) {
+      const gasUrl = getGasUrl();
+      const params = new URLSearchParams({
+        action: 'checkin',
+        qrData: qrData,
+        timestamp: new Date().toISOString()
+      });
+      const url = gasUrl + (gasUrl.indexOf('?') >= 0 ? '&' : '?') + params.toString();
+
+      fetch(url, { method: 'GET', redirect: 'follow' })
+        .then(r => r.json())
+        .then(res => {
+          handleCheckInResponse(res, qrData, retryCount);
+        })
+        .catch(err => {
+          if (retryCount < BUSY_RETRY_MAX) {
+            document.getElementById('status-msg').textContent = 'サーバー混雑中... リトライ ' + (retryCount + 1) + '/' + BUSY_RETRY_MAX + ' 回目';
+            setTimeout(() => sendCheckIn(qrData, retryCount + 1), BUSY_RETRY_DELAY_MS);
+          } else {
+            showResultLocal('error', '通信に失敗しました', qrData);
+            finishSending();
+          }
+        });
+    }
+
+    function handleCheckInResponse(res, qrData, retryCount) {
+      if (res.status === 'busy' && retryCount < BUSY_RETRY_MAX) {
+        document.getElementById('status-msg').textContent = 'サーバー混雑中... リトライ ' + (retryCount + 1) + '/' + BUSY_RETRY_MAX + ' 回目';
+        setTimeout(() => sendCheckIn(qrData, retryCount + 1), BUSY_RETRY_DELAY_MS);
+        return;
+      }
+
+      lastSentQr = qrData;
+      lastSentTime = Date.now();
+
+      if (res.status === 'success') {
+        acceptedSet.add(qrData);
+        addToLog(qrData, res.name, res.time, 'success');
+        showResultFromApi(res, 'success');
+        playSound('success');
+        if (navigator.vibrate) navigator.vibrate(200);
+      } else if (res.status === 'duplicate') {
+        acceptedSet.add(qrData);
+        addToLog(qrData, res.personData && res.personData.氏名 ? res.personData.氏名 : '', null, 'duplicate');
+        showResultFromApi(res, 'duplicate');
+        playSound('error');
+      } else {
+        showResultFromApi(res, 'error');
+        playSound('error');
+      }
+      finishSending();
+    }
+
+    function finishSending() {
+      isSending = false;
+      document.getElementById('reader').style.display = 'none';
+      document.getElementById('result-area').style.display = 'block';
+      document.getElementById('status-msg').textContent = '';
+    }
+
+    function showResultLocal(status, message, qrData) {
+      const resultArea = document.getElementById('result-area');
+      const resultTitle = document.getElementById('result-title');
+      const resultDetails = document.getElementById('result-details');
+      resultArea.style.display = 'block';
+      resultDetails.innerHTML = '';
+      if (status === 'duplicate') {
+        resultArea.className = 'warning';
+        resultTitle.textContent = '⚠️ ' + message;
+      } else {
+        resultArea.className = 'error';
+        resultTitle.textContent = '❌ ' + message;
+      }
+    }
+
+    function showResultFromApi(res, status) {
+      const resultArea = document.getElementById('result-area');
+      const resultTitle = document.getElementById('result-title');
+      const resultDetails = document.getElementById('result-details');
+      resultArea.style.display = 'block';
+      resultDetails.innerHTML = '';
+
+      if (status === 'success') {
+        resultArea.className = 'success';
+        resultTitle.textContent = '✅ ' + (res.message || '受付完了');
+        const data = res.data || {};
+        if (data.ID) {
+          const d = document.createElement('div');
+          d.className = 'data-row';
+          d.innerHTML = '<span class="data-label">ID:</span> <span style="font-family:monospace;">' + data.ID + '</span>';
+          resultDetails.appendChild(d);
+        }
+        if (res.name) {
+          const d = document.createElement('div');
+          d.className = 'data-row';
+          d.innerHTML = '<span class="data-label">氏名:</span> ' + res.name;
+          resultDetails.appendChild(d);
+        }
+        if (res.time) {
+          const d = document.createElement('div');
+          d.className = 'data-row';
+          d.innerHTML = '<span class="data-label">受付時刻:</span> ' + res.time;
+          resultDetails.appendChild(d);
+        }
+        displaySettings.forEach(s => {
+          const v = data[s.key];
+          if (v) {
+            const d = document.createElement('div');
+            d.className = 'data-row';
+            d.innerHTML = '<span class="data-label">' + s.label + ':</span> ' + v;
+            resultDetails.appendChild(d);
+          }
+        });
+      } else if (status === 'duplicate') {
+        resultArea.className = 'warning';
+        resultTitle.textContent = '⚠️ ' + (res.message || '既に受付済みです');
+        const pd = res.personData || res.data;
+        if (pd && typeof pd === 'object') {
+          const name = pd.氏名 || pd.name;
+          if (name) {
+            const d = document.createElement('div');
+            d.className = 'data-row';
+            d.innerHTML = '<span class="data-label">氏名:</span> ' + name;
+            resultDetails.appendChild(d);
+          }
+        }
+      } else {
+        resultArea.className = 'error';
+        resultTitle.textContent = '❌ ' + (res.message || 'エラー');
+      }
+    }
+
+    function resetScanner() {
+      document.getElementById('result-area').style.display = 'none';
+      document.getElementById('reader').style.display = 'block';
+      document.getElementById('status-msg').textContent = 'スキャン中...';
+      if (html5QrcodeScanner) html5QrcodeScanner.resume();
+    }
+
+    function showError(msg) {
+      document.getElementById('error-msg').innerHTML = msg;
+      document.getElementById('error-msg').style.display = 'block';
+      document.getElementById('controls').style.display = 'block';
+      document.getElementById('reader').style.display = 'none';
+      document.getElementById('scan-controls').style.display = 'none';
+      isSending = false;
+    }
+
+    function playSound(type) {
+      try {
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        if (type === 'success') {
+          osc.frequency.setValueAtTime(880, ctx.currentTime);
+          gain.gain.setValueAtTime(0.1, ctx.currentTime);
+          osc.start();
+          osc.stop(ctx.currentTime + 0.1);
+        } else if (type === 'error' || type === 'scan') {
+          osc.frequency.setValueAtTime(600, ctx.currentTime);
+          gain.gain.setValueAtTime(0.05, ctx.currentTime);
+          osc.start();
+          osc.stop(ctx.currentTime + 0.05);
+        }
+      } catch (e) {}
+    }
+  </script>
+</body>
+</html>
