@@ -120,7 +120,7 @@
       const gasUrl = getGasUrl();
       if (!gasUrl) return;
       const url = gasUrl + (gasUrl.indexOf('?') >= 0 ? '&' : '?') + 'action=settings';
-      fetch(url, { method: 'GET', redirect: 'follow', credentials: 'include' })
+      fetch(url, { method: 'GET', redirect: 'follow' })
         .then(r => r.json())
         .then(data => {
           if (Array.isArray(data)) {
@@ -242,7 +242,7 @@
       });
       const url = gasUrl + (gasUrl.indexOf('?') >= 0 ? '&' : '?') + params.toString();
 
-      fetch(url, { method: 'GET', redirect: 'follow', credentials: 'include' })
+      fetch(url, { method: 'GET', redirect: 'follow' })
         .then(r => r.json())
         .then(res => {
           handleCheckInResponse(res, qrData, retryCount);
